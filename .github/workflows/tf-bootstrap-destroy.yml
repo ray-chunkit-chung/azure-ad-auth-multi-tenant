@@ -1,0 +1,100 @@
+name: Terraform Bootstrap Destroy
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'Type "destroy" to confirm deletion of bootstrap backend resources'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  destroy:
+    name: Destroy Terraform Backend
+    runs-on: ubuntu-latest
+    if: github.event.inputs.confirm == 'destroy'
+    env:
+      AWS_REGION: ${{ secrets.AWS_REGION || 'ap-northeast-1' }}
+      BUCKET_NAME: rcoauth2azure-terraform-state
+      DYNAMO_TABLE: rcoauth2azure-terraform-locks
+
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v5
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Empty S3 bucket versions and delete markers
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if ! aws s3api head-bucket --bucket "$BUCKET_NAME" 2>/dev/null; then
+            echo "Bucket $BUCKET_NAME does not exist. Skipping object cleanup."
+            exit 0
+          fi
+
+          echo "Deleting all object versions from $BUCKET_NAME"
+          aws s3api list-object-versions \
+            --bucket "$BUCKET_NAME" \
+            --query '{Objects: Versions[].{Key:Key,VersionId:VersionId}}' \
+            --output json \
+            | jq -c 'select(.Objects != null) | {Objects: .Objects, Quiet: true}' \
+            | while read -r batch; do
+                if [ -n "$batch" ] && [ "$batch" != "null" ]; then
+                  aws s3api delete-objects --bucket "$BUCKET_NAME" --delete "$batch"
+                fi
+              done
+
+          echo "Deleting all delete markers from $BUCKET_NAME"
+          aws s3api list-object-versions \
+            --bucket "$BUCKET_NAME" \
+            --query '{Objects: DeleteMarkers[].{Key:Key,VersionId:VersionId}}' \
+            --output json \
+            | jq -c 'select(.Objects != null) | {Objects: .Objects, Quiet: true}' \
+            | while read -r batch; do
+                if [ -n "$batch" ] && [ "$batch" != "null" ]; then
+                  aws s3api delete-objects --bucket "$BUCKET_NAME" --delete "$batch"
+                fi
+              done
+
+      - name: Delete S3 bucket
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if aws s3api head-bucket --bucket "$BUCKET_NAME" 2>/dev/null; then
+            aws s3api delete-bucket --bucket "$BUCKET_NAME" --region "$AWS_REGION"
+            echo "Deleted bucket: $BUCKET_NAME"
+          else
+            echo "Bucket $BUCKET_NAME does not exist."
+          fi
+
+      - name: Delete DynamoDB lock table
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if aws dynamodb describe-table --table-name "$DYNAMO_TABLE" --region "$AWS_REGION" >/dev/null 2>&1; then
+            aws dynamodb delete-table --table-name "$DYNAMO_TABLE" --region "$AWS_REGION"
+            aws dynamodb wait table-not-exists --table-name "$DYNAMO_TABLE" --region "$AWS_REGION"
+            echo "Deleted DynamoDB table: $DYNAMO_TABLE"
+          else
+            echo "DynamoDB table $DYNAMO_TABLE does not exist."
+          fi
+
+      - name: Summary
+        shell: bash
+        run: |
+          {
+            echo "## Terraform Backend Bootstrap Destroy Complete"
+            echo ""
+            echo "- Region: $AWS_REGION"
+            echo "- S3 Bucket: $BUCKET_NAME"
+            echo "- DynamoDB Lock Table: $DYNAMO_TABLE"
+          } >> "$GITHUB_STEP_SUMMARY"
