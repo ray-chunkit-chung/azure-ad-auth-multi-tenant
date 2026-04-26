@@ -239,6 +239,34 @@ Backend requires:
 - DynamoDB table name
 - OpenAI secret ARN
 
+### Frontend: What scope is requested
+
+- `frontend/hooks/use-auth.ts`
+- Reads `NEXT_PUBLIC_AZURE_API_SCOPE` from environment
+- Sends `scope=openid profile email <api-scope>` to Azure authorize endpoint
+- Sends same scope set in token exchange request
+
+### Frontend CI: What scope gets baked into the static build
+
+- `.github/workflows/frontend.yml`
+- Sets `NEXT_PUBLIC_AZURE_API_SCOPE` as `api://${AZURE_APPLICATION_ID}/chat.access`
+- Result: this value is compiled into frontend assets at build time
+
+### Backend Terraform: What Lambda is configured to enforce
+
+- `infra/backend/variables.tf`
+- `azure_required_scope` default is `chat.access`
+- `infra/backend/main.tf`
+- Passes `AZURE_REQUIRED_SCOPE` and `AZURE_APPLICATION_ID` into Lambda environment variables
+
+### Backend runtime: What is actually validated on every API call
+
+- `backend/src/handler.py`
+- Loads `AZURE_REQUIRED_SCOPE` (default `chat.access`)
+- Validates JWT signature/issuer/audience
+- Rejects token if `scp` does not include required scope
+- Rejects app-only tokens for delegated-user routes
+
 ## CI/CD And Deployment
 
 - Frontend workflow builds static assets, deploys to S3, invalidates CloudFront
