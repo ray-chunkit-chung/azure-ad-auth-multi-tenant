@@ -20,6 +20,10 @@ jobs:
   deploy:
     name: Build and Deploy Backend
     runs-on: ubuntu-latest
+    env:
+      TF_VAR_azure_ad_tenant_id: ${{ secrets.AZURE_TENANT_ID }}
+      TF_VAR_azure_application_id: ${{ secrets.AZURE_APPLICATION_ID }}
+      TF_VAR_azure_required_scope: chat.access
     defaults:
       run:
         working-directory: infra/backend

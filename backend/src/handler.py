@@ -2,16 +2,21 @@ import base64
 import json
 import logging
 import os
+import re
 import time
+import urllib.error
+import urllib.request
 import uuid
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any
 
 import boto3
+import jwt
 from boto3.dynamodb.conditions import Key
 from botocore.exceptions import ClientError
 from openai import OpenAI
+from jwt.algorithms import RSAAlgorithm
 
 LOGGER = logging.getLogger()
 LOGGER.setLevel(logging.INFO)
@@ -22,11 +27,29 @@ OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5-mini")
 SYSTEM_PROMPT = os.getenv("OPENAI_SYSTEM_PROMPT", "You are a helpful assistant.")
 MAX_INPUT_CHARACTERS = int(os.getenv("MAX_INPUT_CHARACTERS", "4000"))
 
+AZURE_AD_TENANT_ID = os.getenv("AZURE_AD_TENANT_ID", "common").strip() or "common"
+AZURE_APPLICATION_ID = os.environ["AZURE_APPLICATION_ID"]
+AZURE_REQUIRED_SCOPE = os.getenv("AZURE_REQUIRED_SCOPE", "chat.access")
+AZURE_ALLOWED_AUDIENCES = {
+    AZURE_APPLICATION_ID,
+    f"api://{AZURE_APPLICATION_ID}",
+}
+AZURE_OIDC_CONFIG_URL = (
+    f"https://login.microsoftonline.com/{AZURE_AD_TENANT_ID}/v2.0/.well-known/openid-configuration"
+)
+AZURE_ISSUER_PATTERN = re.compile(
+    r"^https://login\.microsoftonline\.com/[0-9a-fA-F-]{36}/v2\.0$"
+)
+
+AUTH_CACHE_TTL_SECONDS = int(os.getenv("AUTH_CACHE_TTL_SECONDS", "3600"))
+
 DYNAMODB = boto3.resource("dynamodb")
 TABLE = DYNAMODB.Table(TABLE_NAME)
 SECRETS_MANAGER = boto3.client("secretsmanager")
 
 OPENAI_CLIENT: OpenAI | None = None
+OIDC_CONFIG_CACHE: dict[str, Any] = {"expires_at": 0, "value": None}
+JWKS_CACHE: dict[str, dict[str, Any]] = {}
 
 
 class ApiError(Exception):
@@ -137,20 +160,173 @@ def _serialize_message(item: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _extract_user_sub(event: dict[str, Any]) -> str:
-    claims = (
-        event.get("requestContext", {})
-        .get("authorizer", {})
-        .get("jwt", {})
-        .get("claims", {})
-    )
-
-    # Azure AD typically includes "sub" and often "oid".
-    # Prefer sub when present and fall back to oid for stable per-user partitioning.
-    user_sub = claims.get("sub") or claims.get("oid")
+def _extract_user_sub_from_claims(claims: dict[str, Any]) -> str:
+    # Azure AD delegated tokens usually contain oid for users.
+    # sub is used as fallback so personal accounts still work.
+    user_sub = claims.get("oid") or claims.get("sub")
     if not isinstance(user_sub, str) or not user_sub:
         raise ApiError(401, "Unauthorized")
     return user_sub
+
+
+def _http_get_json(url: str) -> dict[str, Any]:
+    request = urllib.request.Request(url, method="GET")
+    try:
+        with urllib.request.urlopen(request, timeout=5) as response:
+            payload = response.read().decode("utf-8")
+    except urllib.error.URLError as exc:
+        LOGGER.exception("Failed to fetch auth metadata from %s", url)
+        raise ApiError(503, "Authentication service unavailable") from exc
+
+    try:
+        parsed = json.loads(payload)
+    except json.JSONDecodeError as exc:
+        raise ApiError(503, "Authentication metadata is invalid") from exc
+
+    if not isinstance(parsed, dict):
+        raise ApiError(503, "Authentication metadata is invalid")
+
+    return parsed
+
+
+def _get_oidc_configuration() -> dict[str, Any]:
+    now = int(time.time())
+    cached = OIDC_CONFIG_CACHE.get("value")
+    expires_at = int(OIDC_CONFIG_CACHE.get("expires_at") or 0)
+    if isinstance(cached, dict) and expires_at > now:
+        return cached
+
+    config = _http_get_json(AZURE_OIDC_CONFIG_URL)
+    issuer = config.get("issuer")
+    jwks_uri = config.get("jwks_uri")
+    if not isinstance(issuer, str) or not isinstance(jwks_uri, str):
+        raise ApiError(503, "Authentication metadata missing issuer or jwks")
+
+    OIDC_CONFIG_CACHE["value"] = config
+    OIDC_CONFIG_CACHE["expires_at"] = now + AUTH_CACHE_TTL_SECONDS
+    return config
+
+
+def _get_jwks(jwks_uri: str) -> dict[str, Any]:
+    now = int(time.time())
+    cached = JWKS_CACHE.get(jwks_uri)
+    if cached and int(cached.get("expires_at", 0)) > now:
+        value = cached.get("value")
+        if isinstance(value, dict):
+            return value
+
+    jwks = _http_get_json(jwks_uri)
+    keys = jwks.get("keys")
+    if not isinstance(keys, list):
+        raise ApiError(503, "Authentication key set is invalid")
+
+    JWKS_CACHE[jwks_uri] = {
+        "value": jwks,
+        "expires_at": now + AUTH_CACHE_TTL_SECONDS,
+    }
+    return jwks
+
+
+def _extract_bearer_token(event: dict[str, Any]) -> str:
+    headers = event.get("headers") or {}
+    if not isinstance(headers, dict):
+        raise ApiError(401, "Missing Authorization header")
+
+    authorization = ""
+    for key, value in headers.items():
+        if isinstance(key, str) and key.lower() == "authorization" and isinstance(value, str):
+            authorization = value
+            break
+
+    if not authorization:
+        raise ApiError(401, "Missing Authorization header")
+
+    parts = authorization.split(" ", 1)
+    if len(parts) != 2 or parts[0].lower() != "bearer" or not parts[1].strip():
+        raise ApiError(401, "Invalid Authorization header")
+
+    return parts[1].strip()
+
+
+def _parse_scope_claim(claims: dict[str, Any]) -> set[str]:
+    scp = claims.get("scp")
+    if not isinstance(scp, str) or not scp.strip():
+        return set()
+    return {part for part in scp.split(" ") if part}
+
+
+def _signing_key_from_jwks(token: str, jwks: dict[str, Any]) -> Any:
+    try:
+        header = jwt.get_unverified_header(token)
+    except jwt.InvalidTokenError as exc:
+        raise ApiError(401, "Invalid token header") from exc
+
+    kid = header.get("kid")
+    if not isinstance(kid, str) or not kid:
+        raise ApiError(401, "Token signing key is missing")
+
+    keys = jwks.get("keys")
+    if not isinstance(keys, list):
+        raise ApiError(503, "Authentication key set is invalid")
+
+    for key in keys:
+        if isinstance(key, dict) and key.get("kid") == kid:
+            try:
+                return RSAAlgorithm.from_jwk(json.dumps(key))
+            except Exception as exc:  # pylint: disable=broad-except
+                raise ApiError(401, "Unsupported signing key") from exc
+
+    raise ApiError(401, "Token signing key not recognized")
+
+
+def _validate_issuer(issuer: Any) -> None:
+    if not isinstance(issuer, str) or not AZURE_ISSUER_PATTERN.match(issuer):
+        raise ApiError(401, "Token issuer is invalid")
+
+
+def _validate_access_token(token: str) -> dict[str, Any]:
+    oidc = _get_oidc_configuration()
+    jwks_uri = oidc.get("jwks_uri")
+    if not isinstance(jwks_uri, str) or not jwks_uri:
+        raise ApiError(503, "Authentication metadata is incomplete")
+
+    jwks = _get_jwks(jwks_uri)
+    key = _signing_key_from_jwks(token, jwks)
+
+    try:
+        claims = jwt.decode(
+            token,
+            key=key,
+            algorithms=["RS256"],
+            audience=list(AZURE_ALLOWED_AUDIENCES),
+            options={
+                "require": ["exp", "iss", "aud"],
+                "verify_signature": True,
+                "verify_aud": True,
+                "verify_exp": True,
+                "verify_iss": False,
+            },
+        )
+    except jwt.ExpiredSignatureError as exc:
+        raise ApiError(401, "Token is expired") from exc
+    except jwt.InvalidAudienceError as exc:
+        raise ApiError(401, "Token audience is invalid") from exc
+    except jwt.InvalidTokenError as exc:
+        raise ApiError(401, "Token is invalid") from exc
+
+    _validate_issuer(claims.get("iss"))
+
+    scope_set = _parse_scope_claim(claims)
+    if not scope_set:
+        raise ApiError(403, "Delegated user token is required")
+
+    if AZURE_REQUIRED_SCOPE not in scope_set:
+        raise ApiError(403, f"Token is missing required scope: {AZURE_REQUIRED_SCOPE}")
+
+    if claims.get("idtyp") == "app":
+        raise ApiError(403, "Application tokens are not allowed")
+
+    return claims
 
 
 def _extract_secret_value(secret_string: str) -> str:
@@ -459,7 +635,18 @@ def lambda_handler(event: dict[str, Any], _context: Any) -> dict[str, Any]:
         if route_key == "GET /chat/health":
             return _json_response(200, {"ok": True})
 
-        user_sub = _extract_user_sub(event)
+        protected_routes = {
+            "GET /chat/sessions",
+            "GET /chat/sessions/{sessionId}",
+            "DELETE /chat/sessions/{sessionId}",
+            "POST /chat/messages",
+        }
+        if route_key not in protected_routes:
+            return _json_response(404, {"message": "Not Found"})
+
+        access_token = _extract_bearer_token(event)
+        claims = _validate_access_token(access_token)
+        user_sub = _extract_user_sub_from_claims(claims)
 
         if route_key == "GET /chat/sessions":
             return _json_response(200, _list_sessions(user_sub))
@@ -475,8 +662,6 @@ def lambda_handler(event: dict[str, Any], _context: Any) -> dict[str, Any]:
         if route_key == "POST /chat/messages":
             response = _post_message(user_sub, event)
             return _json_response(200, response)
-
-        return _json_response(404, {"message": "Not Found"})
     except ApiError as exc:
         return _json_response(exc.status_code, {"message": exc.message})
     except Exception:  # pylint: disable=broad-except

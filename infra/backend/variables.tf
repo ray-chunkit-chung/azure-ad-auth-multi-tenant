@@ -28,20 +28,24 @@ variable "lambda_warmup_interval_minutes" {
   default     = 5
 }
 
-variable "enable_azure_ad_auth" {
-  description = "Enable Azure AD JWT authorizer on protected routes"
-  type        = bool
-  default     = false
-}
-
 variable "azure_ad_tenant_id" {
-  description = "Azure AD tenant ID used to build issuer URL"
+  description = "Azure AD tenant path used for OIDC discovery (for example common)"
   type        = string
-  default     = ""
+  default     = "common"
 }
 
-variable "azure_ad_client_id" {
-  description = "Azure AD application client ID used as API audience"
+variable "azure_application_id" {
+  description = "Azure AD application ID used as API audience"
   type        = string
-  default     = ""
+
+  validation {
+    condition     = length(trimspace(var.azure_application_id)) > 0
+    error_message = "azure_application_id must be provided."
+  }
+}
+
+variable "azure_required_scope" {
+  description = "Delegated scope required in access token scp claim"
+  type        = string
+  default     = "chat.access"
 }

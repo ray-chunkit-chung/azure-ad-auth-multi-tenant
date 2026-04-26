@@ -1,8 +1,6 @@
 locals {
   lambda_zip_path   = "${path.module}/../../backend/dist/lambda.zip"
   openai_secret_name = "${var.project_prefix}/backend/openai-api-key"
-
-  azure_ad_issuer = "https://login.microsoftonline.com/${var.azure_ad_tenant_id}/v2.0"
 }
 
 resource "aws_secretsmanager_secret" "openai_api_key" {
@@ -103,6 +101,9 @@ resource "aws_lambda_function" "chat_api" {
       OPENAI_MODEL         = var.openai_model
       OPENAI_SYSTEM_PROMPT = "You are a helpful assistant."
       MAX_INPUT_CHARACTERS = "4000"
+      AZURE_AD_TENANT_ID   = var.azure_ad_tenant_id
+      AZURE_APPLICATION_ID = var.azure_application_id
+      AZURE_REQUIRED_SCOPE = var.azure_required_scope
     }
   }
 }
@@ -124,20 +125,6 @@ resource "aws_apigatewayv2_api" "chat" {
   }
 }
 
-resource "aws_apigatewayv2_authorizer" "azure_ad" {
-  count = var.enable_azure_ad_auth ? 1 : 0
-
-  api_id           = aws_apigatewayv2_api.chat.id
-  name             = "${var.project_prefix}-azuread-jwt"
-  authorizer_type  = "JWT"
-  identity_sources = ["$request.header.Authorization"]
-
-  jwt_configuration {
-    audience = [var.azure_ad_client_id]
-    issuer   = local.azure_ad_issuer
-  }
-}
-
 resource "aws_apigatewayv2_integration" "chat_lambda" {
   api_id                 = aws_apigatewayv2_api.chat.id
   integration_type       = "AWS_PROXY"
@@ -152,35 +139,27 @@ resource "aws_apigatewayv2_route" "health" {
 }
 
 resource "aws_apigatewayv2_route" "list_sessions" {
-  api_id             = aws_apigatewayv2_api.chat.id
-  route_key          = "GET /chat/sessions"
-  authorization_type = var.enable_azure_ad_auth ? "JWT" : "NONE"
-  authorizer_id      = var.enable_azure_ad_auth ? aws_apigatewayv2_authorizer.azure_ad[0].id : null
-  target             = "integrations/${aws_apigatewayv2_integration.chat_lambda.id}"
+  api_id    = aws_apigatewayv2_api.chat.id
+  route_key = "GET /chat/sessions"
+  target    = "integrations/${aws_apigatewayv2_integration.chat_lambda.id}"
 }
 
 resource "aws_apigatewayv2_route" "get_session" {
-  api_id             = aws_apigatewayv2_api.chat.id
-  route_key          = "GET /chat/sessions/{sessionId}"
-  authorization_type = var.enable_azure_ad_auth ? "JWT" : "NONE"
-  authorizer_id      = var.enable_azure_ad_auth ? aws_apigatewayv2_authorizer.azure_ad[0].id : null
-  target             = "integrations/${aws_apigatewayv2_integration.chat_lambda.id}"
+  api_id    = aws_apigatewayv2_api.chat.id
+  route_key = "GET /chat/sessions/{sessionId}"
+  target    = "integrations/${aws_apigatewayv2_integration.chat_lambda.id}"
 }
 
 resource "aws_apigatewayv2_route" "delete_session" {
-  api_id             = aws_apigatewayv2_api.chat.id
-  route_key          = "DELETE /chat/sessions/{sessionId}"
-  authorization_type = var.enable_azure_ad_auth ? "JWT" : "NONE"
-  authorizer_id      = var.enable_azure_ad_auth ? aws_apigatewayv2_authorizer.azure_ad[0].id : null
-  target             = "integrations/${aws_apigatewayv2_integration.chat_lambda.id}"
+  api_id    = aws_apigatewayv2_api.chat.id
+  route_key = "DELETE /chat/sessions/{sessionId}"
+  target    = "integrations/${aws_apigatewayv2_integration.chat_lambda.id}"
 }
 
 resource "aws_apigatewayv2_route" "post_message" {
-  api_id             = aws_apigatewayv2_api.chat.id
-  route_key          = "POST /chat/messages"
-  authorization_type = var.enable_azure_ad_auth ? "JWT" : "NONE"
-  authorizer_id      = var.enable_azure_ad_auth ? aws_apigatewayv2_authorizer.azure_ad[0].id : null
-  target             = "integrations/${aws_apigatewayv2_integration.chat_lambda.id}"
+  api_id    = aws_apigatewayv2_api.chat.id
+  route_key = "POST /chat/messages"
+  target    = "integrations/${aws_apigatewayv2_integration.chat_lambda.id}"
 }
 
 resource "aws_apigatewayv2_stage" "default" {
