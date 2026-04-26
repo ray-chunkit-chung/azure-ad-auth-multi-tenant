@@ -99,6 +99,11 @@ jobs:
       - name: Build
         working-directory: frontend
         env:
+          NEXT_PUBLIC_AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          NEXT_PUBLIC_AZURE_APPLICATION_ID: ${{ secrets.AZURE_APPLICATION_ID }}
+          NEXT_PUBLIC_AZURE_REDIRECT_URI: ${{ steps.config.outputs.frontend_base_url }}/auth/callback
+          NEXT_PUBLIC_AZURE_LOGOUT_URI: ${{ steps.config.outputs.frontend_base_url }}
+          NEXT_PUBLIC_AZURE_API_SCOPE: api://${{ secrets.AZURE_APPLICATION_ID }}/chat.access
           NEXT_PUBLIC_CHAT_API_BASE_URL: ${{ steps.config.outputs.chat_api_url }}
         run: pnpm build
 
