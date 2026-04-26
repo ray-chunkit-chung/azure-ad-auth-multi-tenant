@@ -1,0 +1,100 @@
+name: Backend
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: azure-fullstack-deploy
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    name: Build and Deploy Backend
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: infra/backend
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup Python 3.13
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Build Lambda package
+        shell: bash
+        run: |
+          chmod +x ../../backend/build.sh
+          ../../backend/build.sh
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v4
+
+      - name: Terraform Init
+        shell: bash
+        run: terraform init
+
+      - name: Terraform Format Check
+        shell: bash
+        run: terraform fmt -check
+
+      - name: Terraform Validate
+        shell: bash
+        run: terraform validate
+
+      - name: Terraform Plan
+        shell: bash
+        run: terraform plan -out=tfplan
+
+      - name: Terraform Apply
+        shell: bash
+        run: terraform apply -auto-approve tfplan
+
+      - name: Read backend config from SSM
+        id: config
+        shell: bash
+        run: |
+          CHAT_API_URL=$(aws ssm get-parameter --name /rcoauth2azure/backend/chat-api-url --query Parameter.Value --output text)
+          OPENAI_SECRET_ARN=$(aws ssm get-parameter --name /rcoauth2azure/backend/openai-secret-arn --query Parameter.Value --output text)
+
+          echo "chat_api_url=$CHAT_API_URL" >> "$GITHUB_OUTPUT"
+          echo "openai_secret_arn=$OPENAI_SECRET_ARN" >> "$GITHUB_OUTPUT"
+
+      - name: Update OpenAI secret value
+        shell: bash
+        run: |
+          aws secretsmanager put-secret-value \
+            --secret-id "${{ steps.config.outputs.openai_secret_arn }}" \
+            --secret-string "${{ secrets.OPENAI_API_KEY }}"
+
+      - name: Smoke test health endpoint
+        shell: bash
+        run: |
+          HEALTH_URL="${{ steps.config.outputs.chat_api_url }}/chat/health"
+          curl -fsS --connect-timeout 5 --max-time 15 "$HEALTH_URL"
+
+      - name: Deployment Summary
+        if: ${{ success() }}
+        shell: bash
+        run: |
+          {
+            echo "## Backend Deployment Summary"
+            echo ""
+            echo "| Item | Value |"
+            echo "| --- | --- |"
+            echo "| Chat API URL | ${{ steps.config.outputs.chat_api_url }} |"
+            echo "| OpenAI Secret ARN | ${{ steps.config.outputs.openai_secret_arn }} |"
+          } >> "$GITHUB_STEP_SUMMARY"

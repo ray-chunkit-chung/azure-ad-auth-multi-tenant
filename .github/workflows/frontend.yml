@@ -1,0 +1,128 @@
+name: Frontend
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: azure-fullstack-deploy
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  terraform:
+    name: Terraform
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: infra/frontend
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v5
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+
+      - name: Terraform Init
+        run: terraform init
+
+      - name: Terraform Format Check
+        run: terraform fmt -check
+
+      - name: Terraform Validate
+        run: terraform validate
+
+      - name: Terraform Plan
+        run: terraform plan -out=tfplan
+
+      - name: Terraform Apply
+        run: terraform apply -auto-approve tfplan
+
+  deploy:
+    name: Build and Deploy
+    runs-on: ubuntu-latest
+    needs: terraform
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: 22
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v5
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Read deploy config from SSM
+        id: config
+        run: |
+          DIST_ID=$(aws ssm get-parameter --name /rcoauth2azure/frontend/cloudfront-distribution-id --query Parameter.Value --output text)
+          S3_BUCKET=$(aws ssm get-parameter --name /rcoauth2azure/frontend/s3-bucket-name --query Parameter.Value --output text)
+          FRONTEND_BASE_URL=$(aws ssm get-parameter --name /rcoauth2azure/frontend/frontend-base-url --query Parameter.Value --output text)
+          CHAT_API_URL=$(aws ssm get-parameter --name /rcoauth2azure/backend/chat-api-url --query Parameter.Value --output text)
+
+          echo "distribution_id=$DIST_ID" >> "$GITHUB_OUTPUT"
+          echo "s3_bucket=$S3_BUCKET" >> "$GITHUB_OUTPUT"
+          echo "frontend_base_url=$FRONTEND_BASE_URL" >> "$GITHUB_OUTPUT"
+          echo "chat_api_url=$CHAT_API_URL" >> "$GITHUB_OUTPUT"
+
+      - name: Install dependencies
+        working-directory: frontend
+        run: pnpm install --no-frozen-lockfile
+
+      - name: Build
+        working-directory: frontend
+        env:
+          NEXT_PUBLIC_CHAT_API_BASE_URL: ${{ steps.config.outputs.chat_api_url }}
+        run: pnpm build
+
+      - name: Verify static output exists
+        working-directory: frontend
+        run: |
+          if [ ! -d "out" ]; then
+            echo "Missing static export folder: out"
+            exit 1
+          fi
+
+      - name: Deploy to S3
+        working-directory: frontend
+        run: aws s3 sync out/ s3://${{ steps.config.outputs.s3_bucket }} --delete
+
+      - name: Invalidate CloudFront cache
+        run: |
+          aws cloudfront create-invalidation \
+            --distribution-id "${{ steps.config.outputs.distribution_id }}" \
+            --paths "/*"
+
+      - name: Deployment Summary
+        if: ${{ success() }}
+        run: |
+          {
+            echo "## Frontend Deployment Summary"
+            echo ""
+            echo "| Item | Value |"
+            echo "| --- | --- |"
+            echo "| Frontend URL | ${{ steps.config.outputs.frontend_base_url }} |"
+            echo "| S3 Bucket | ${{ steps.config.outputs.s3_bucket }} |"
+            echo "| CloudFront Distribution ID | ${{ steps.config.outputs.distribution_id }} |"
+          } >> "$GITHUB_STEP_SUMMARY"
