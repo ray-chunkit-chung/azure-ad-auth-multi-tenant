@@ -1,5 +1,19 @@
 # AWS OAuth2 Azure AD Example
 
+## Secrets
+
+Use these GitHub Actions secrets for CI/CD:
+
+```text
+AWS_ACCESS_KEY_ID
+AWS_SECRET_ACCESS_KEY
+AWS_REGION
+AWS_ACCOUNT_ID
+AZURE_TENANT_ID
+AZURE_APPLICATION_ID
+OPENAI_API_KEY
+```
+
 ## Current Status
 
 This repository is scaffolded for:

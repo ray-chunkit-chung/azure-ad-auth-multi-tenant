@@ -1,6 +1,12 @@
 name: Backend
 
 on:
+  push:
+    branches: [main]
+    paths:
+      - "backend/**"
+      - "infra/backend/**"
+      - ".github/workflows/backend.yml"
   workflow_dispatch:
 
 concurrency:

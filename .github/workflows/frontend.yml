@@ -1,6 +1,12 @@
 name: Frontend
 
 on:
+  push:
+    branches: [main]
+    paths:
+      - "frontend/**"
+      - "infra/frontend/**"
+      - ".github/workflows/frontend.yml"
   workflow_dispatch:
 
 concurrency:
