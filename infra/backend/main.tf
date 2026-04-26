@@ -1,5 +1,5 @@
 locals {
-  lambda_zip_path   = "${path.module}/../../backend/dist/lambda.zip"
+  lambda_zip_path    = "${path.module}/../../backend/dist/lambda.zip"
   openai_secret_name = "${var.project_prefix}/backend/openai-api-key"
 }
 
