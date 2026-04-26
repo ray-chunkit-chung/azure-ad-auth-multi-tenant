@@ -74,9 +74,9 @@ resource "aws_iam_role_policy" "chat_lambda" {
         Resource = aws_dynamodb_table.chat.arn
       },
       {
-        Sid    = "OpenAISecretRead"
-        Effect = "Allow"
-        Action = ["secretsmanager:GetSecretValue"]
+        Sid      = "OpenAISecretRead"
+        Effect   = "Allow"
+        Action   = ["secretsmanager:GetSecretValue"]
         Resource = aws_secretsmanager_secret.openai_api_key.arn
       }
     ]
