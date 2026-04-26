@@ -10,6 +10,20 @@ Demo URL
 https://d2aqs0exh7ehxw.cloudfront.net/
 ```
 
+## Secrets
+
+Use these GitHub Actions secrets for CI/CD:
+
+```text
+AWS_ACCESS_KEY_ID
+AWS_SECRET_ACCESS_KEY
+AWS_REGION
+AWS_ACCOUNT_ID
+AZURE_APPLICATION_ID
+AZURE_TENANT_ID
+OPENAI_API_KEY
+```
+
 ## ASCII Diagrams
 
 ### High-Level Architecture
