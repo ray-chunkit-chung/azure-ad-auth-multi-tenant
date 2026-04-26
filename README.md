@@ -1,4 +1,4 @@
-# AWS + Azure AD OAuth2 Chat Example
+# AWS + Azure AD OIDC/JWT Example
 
 This project is a serverless chat app with a Next.js frontend on AWS and a Python Lambda backend protected by Microsoft Entra ID (Azure AD) delegated access tokens.
 
