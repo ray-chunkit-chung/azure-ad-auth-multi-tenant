@@ -15,129 +15,127 @@ https://d2aqs0exh7ehxw.cloudfront.net/
 ### High-Level Architecture
 
 ```text
- +-------------------+         +---------------------------+
- |      Browser      |  HTTPS  |   CloudFront + S3 Static |
- |   (Next.js SPA)   +-------->+      Frontend Hosting     |
- +---------+---------+         +-------------+-------------+
-     |                                     |
-     | OAuth2 (PKCE)                       | API calls (Bearer token)
-     v                                     v
- +---------------------------+         +---------------------------+
- | Microsoft Entra ID (AAD) |         | API Gateway (HTTP API)   |
- |  authorize/token + JWKS  |         +-------------+-------------+
- +-------------+-------------+                       |
-      |                                     v
-      | OIDC metadata/JWKS       +---------------------------+
-      +-------------------------->+ Python Lambda            |
-            | - JWT validation          |
-            | - scope check chat.access |
-            | - OpenAI chat logic       |
-            +------+------+-------------+
-             |      |
-             |      +----------------------+
-             v                             v
-           +-------------------+      +-------------------------+
-           | DynamoDB (chat)   |      | Secrets Manager (OpenAI)|
-           +-------------------+      +-------------------------+
+ +-------------------------+      HTTPS      +---------------------------+
+ | Browser (Next.js SPA)   | --------------> | CloudFront + S3 (Static) |
+ +------------+------------+                 +-------------+-------------+
+              | OAuth2 (PKCE)                              | API calls (Bearer token)
+              v                                            v
+ +-----------------------------+             +---------------------------+
+ | Microsoft Entra ID (AAD)    |             | API Gateway (HTTP API)   |
+ | Authorize/Token + OIDC/JWKS |             +-------------+-------------+
+ +--------------+--------------+                           |
+                | OIDC metadata + JWKS                    v
+                +------------------------------> +-----------------------+
+                                               | Python Lambda         |
+                                               | - JWT validation      |
+                                               | - Scope: chat.access  |
+                                               | - OpenAI chat logic   |
+                                               +-----------+-----------+
+                                                           |
+                       +-----------------------------------+-----------------------------------+
+                       v                                                                       v
+            +------------------------+                                      +-------------------------+
+            | DynamoDB (chat data)   |                                      | Secrets Manager (OpenAI)|
+            +------------------------+                                      +-------------------------+
 ```
 
 ### OAuth2 + API Authorization Flow
 
 ```text
- User/Browser                Entra ID                    Frontend Callback            Backend API
-  |                          |                               |                         |
- 1) Click Sign In              |                               |                         |
-  |---- authorize + PKCE --->|                               |                         |
-  |<--- login/consent -------|                               |                         |
-  |<--- code (redirect) -----|----> /auth/callback -------->|                         |
-  |                          |                               |                         |
- 2) Exchange code for tokens    |                               |                         |
-  |---- token + verifier ---->|                               |                         |
-  |<--- access_token,id_token|                               |                         |
-  |                          |                               |                         |
- 3) Call protected API          |                               |                         |
-  |-------------------------------------------------------- Authorization: Bearer --->|
-  |                          |                               |                         |
- 4) Validate + enforce scope    |                               |                         |
-  |                          |<--- fetch OIDC/JWKS as needed --------------------------|
-  |                          |                               |                         |
-  |<------------------------------ 200 OK (or 401/403) -------------------------------|
+ User/Browser            Entra ID              Frontend Callback             Backend API
+      |                     |                         |                           |
+ 1)   | Click Sign In       |                         |                           |
+      |-- authorize+PKCE -->|                         |                           |
+      |<-- login/consent ---|                         |                           |
+      |<-- code (redirect) -|--> /auth/callback ----->|                           |
+      |                     |                         |                           |
+ 2)   | Exchange code for tokens                      |                           |
+      |-- token+verifier -->|                         |                           |
+      |<-- access_token,id_token                      |                           |
+      |                     |                         |                           |
+ 3)   | Call protected API                             |                           |
+      |------------------------------------------------ Authorization: Bearer ----->|
+      |                     |                         |                           |
+ 4)   |                     |<-- fetch OIDC/JWKS as needed --------------------------|
+      |<---------------------------------- 200 OK (or 401/403) ---------------------|
 ```
 
 ### CI/CD and Infra Flow
 
 ```text
-   GitHub Actions
-      |
-   +-----------+-----------+
-   |                       |
-   v                       v
-  frontend.yml            backend.yml
-   |                       |
-  Terraform apply        Build Lambda zip
-  (infra/frontend)       Terraform apply (infra/backend)
-   |                       |
+         GitHub Actions
+               |
+       +-------+--------+
+       |                |
+       v                v
+   frontend.yml     backend.yml
+       |                |
+       |                +--> Build Lambda artifact
+       +--> Terraform apply (infra/frontend)
+       |                +--> Terraform apply (infra/backend)
+       v                v
   S3 + CloudFront + SSM   API GW + Lambda + DynamoDB + Secrets + SSM
-   |                       |
-   +-----------+-----------+
-      |
-      v
-   Deployed Full Stack
+               \          /
+                \        /
+                 +------+
+                    |
+                    v
+             Deployed Full Stack
 ```
 
-   ## Mermaid Diagrams
+## Mermaid Diagrams
 
-   ### High-Level Architecture (Mermaid)
+### High-Level Architecture (Mermaid)
 
-   ```mermaid
-   flowchart LR
-      B[Browser\nNext.js SPA] -->|HTTPS| CF[CloudFront + S3\nFrontend Hosting]
-      B -->|OAuth2 PKCE| AAD[Microsoft Entra ID\nAuthorize/Token + JWKS]
-      B -->|Bearer Access Token| APIGW[API Gateway\nHTTP API]
+```mermaid
+flowchart LR
+  B[Browser\nNext.js SPA] -->|HTTPS| CF[CloudFront + S3\nFrontend Hosting]
+  B -->|OAuth2 PKCE| AAD[Microsoft Entra ID\nAuthorize/Token + JWKS]
+  B -->|Bearer Access Token| APIGW[API Gateway\nHTTP API]
 
-      APIGW --> L[Python Lambda\nJWT validation + scope check + chat logic]
-      L --> DDB[(DynamoDB\nchat data)]
-      L --> SM[(Secrets Manager\nOpenAI key)]
-      L -.->|OIDC metadata + JWKS| AAD
-   ```
+  APIGW --> L[Python Lambda\nJWT validation + scope check + chat logic]
+  L --> DDB[(DynamoDB\nchat data)]
+  L --> SM[(Secrets Manager\nOpenAI key)]
+  L -.->|OIDC metadata + JWKS| AAD
+```
 
-   ### OAuth2 + API Authorization Flow (Mermaid)
+### OAuth2 + API Authorization Flow (Mermaid)
 
-   ```mermaid
-   sequenceDiagram
-      autonumber
-      participant U as User/Browser
-      participant A as Entra ID
-      participant F as Frontend Callback
-      participant B as Backend API
+```mermaid
+sequenceDiagram
+  autonumber
+  participant U as User/Browser
+  participant A as Entra ID
+  participant F as Frontend Callback
+  participant B as Backend API
 
-      U->>A: Authorize request (PKCE, openid profile email chat.access)
-      A-->>U: Login + consent, then authorization code
-      U->>F: Redirect to /auth/callback with code
-      F->>A: Token request (code + code_verifier)
-      A-->>F: access_token + id_token
-      F->>B: API call with Bearer access_token
-      B->>A: Fetch/refresh OIDC metadata + JWKS (as needed)
-      B-->>F: 200 OK (or 401/403 on auth failure)
-   ```
+  U->>A: Authorize request (PKCE, openid profile email chat.access)
+  A-->>U: Login + consent, then authorization code
+  U->>F: Redirect to /auth/callback with code
+  F->>A: Token request (code + code_verifier)
+  A-->>F: access_token + id_token
+  F->>B: API call with Bearer access_token
+  B->>A: Fetch/refresh OIDC metadata + JWKS (as needed)
+  B-->>F: 200 OK (or 401/403 on auth failure)
+```
 
-   ### CI/CD and Infra Flow (Mermaid)
+### CI/CD and Infra Flow (Mermaid)
 
-   ```mermaid
-   flowchart TB
-      GHA[GitHub Actions] --> FW[frontend.yml]
-      GHA --> BW[backend.yml]
+```mermaid
+flowchart TB
+  GHA[GitHub Actions] --> FW[frontend.yml]
+  GHA --> BW[backend.yml]
 
-      FW --> TF1[Terraform apply\ninfra/frontend]
-      TF1 --> FE[S3 + CloudFront + SSM]
+  FW --> TF1[Terraform apply\ninfra/frontend]
+  TF1 --> FE[S3 + CloudFront + SSM]
 
-      BW --> PKG[Build Lambda artifact]
-      PKG --> TF2[Terraform apply\ninfra/backend]
-      TF2 --> BE[API Gateway + Lambda + DynamoDB + Secrets + SSM]
+  BW --> PKG[Build Lambda artifact]
+  PKG --> TF2[Terraform apply\ninfra/backend]
+  TF2 --> BE[API Gateway + Lambda + DynamoDB + Secrets + SSM]
 
-      FE --> APP[Deployed Full Stack]
-      BE --> APP
-   ```
+  FE --> APP[Deployed Full Stack]
+  BE --> APP
+```
 
 ## Architecture At A Glance
 
@@ -178,7 +176,7 @@ https://d2aqs0exh7ehxw.cloudfront.net/
 - Delegated user token (not app-only token)
 - Required scope `chat.access` in `scp` claim
 
-10. If valid, backend serves chat APIs; otherwise returns 401/403.
+1. If valid, backend serves chat APIs; otherwise returns 401/403.
 
 ## Azure AD Setup (What Was Configured)
 
