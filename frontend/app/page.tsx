@@ -18,6 +18,10 @@ import {
   listChatSessions,
   postChatMessage,
 } from "../lib/chat-api";
+import {
+  getChatApiBaseUrl,
+  RuntimeConfigMissingError,
+} from "../lib/runtime-config";
 
 const TEMP_USER_MESSAGE_PREFIX = "temp-user-";
 const TEMP_ASSISTANT_MESSAGE_PREFIX = "temp-assistant-";
@@ -69,15 +73,48 @@ export default function Home() {
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
   const lastAssistantMessageIdRef = useRef<string | null>(null);
   const slowSendTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  const isChatConfigured = Boolean(
-    (process.env.NEXT_PUBLIC_CHAT_API_BASE_URL ?? "").trim(),
-  );
+  const [chatConfigStatus, setChatConfigStatus] = useState<
+    "loading" | "ready" | "missing" | "unavailable"
+  >("loading");
+  const [chatConfigError, setChatConfigError] = useState<string | null>(null);
+  const [chatConfigAttempt, setChatConfigAttempt] = useState(0);
 
   const orderedSessions = useMemo(
     () => [...sessions].sort(sortSessionsByUpdatedAt),
     [sessions],
   );
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function checkChatConfig() {
+      setChatConfigStatus("loading");
+      setChatConfigError(null);
+
+      try {
+        await getChatApiBaseUrl();
+        if (!cancelled) {
+          setChatConfigStatus("ready");
+        }
+      } catch (configError) {
+        if (!cancelled) {
+          if (configError instanceof RuntimeConfigMissingError) {
+            setChatConfigStatus("missing");
+            return;
+          }
+
+          setChatConfigStatus("unavailable");
+          setChatConfigError(toErrorMessage(configError));
+        }
+      }
+    }
+
+    void checkChatConfig();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [chatConfigAttempt]);
 
   useEffect(() => {
     if (!isLoading && !isAuthenticated) {
@@ -86,7 +123,7 @@ export default function Home() {
   }, [isAuthenticated, isLoading, router]);
 
   useEffect(() => {
-    if (isLoading || !isAuthenticated || !isChatConfigured) {
+    if (isLoading || !isAuthenticated || chatConfigStatus !== "ready") {
       return;
     }
 
@@ -130,13 +167,13 @@ export default function Home() {
     return () => {
       cancelled = true;
     };
-  }, [isAuthenticated, isChatConfigured, isLoading]);
+  }, [chatConfigStatus, isAuthenticated, isLoading]);
 
   useEffect(() => {
     if (
       isLoading ||
       !isAuthenticated ||
-      !isChatConfigured ||
+      chatConfigStatus !== "ready" ||
       !activeSessionId
     ) {
       return;
@@ -172,7 +209,7 @@ export default function Home() {
     return () => {
       cancelled = true;
     };
-  }, [activeSessionId, isAuthenticated, isChatConfigured, isLoading]);
+  }, [activeSessionId, chatConfigStatus, isAuthenticated, isLoading]);
 
   useEffect(() => {
     const lastAssistantMessage = [...messages]
@@ -227,7 +264,7 @@ export default function Home() {
     event.preventDefault();
 
     const text = draft.trim();
-    if (!text || isSending || !isChatConfigured) {
+    if (!text || isSending || chatConfigStatus !== "ready") {
       return;
     }
 
@@ -355,7 +392,15 @@ export default function Home() {
     );
   }
 
-  if (!isChatConfigured) {
+  if (chatConfigStatus === "loading") {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-slate-900 px-6 text-slate-100">
+        <p className="text-sm text-slate-300">Loading chat configuration...</p>
+      </div>
+    );
+  }
+
+  if (chatConfigStatus === "missing") {
     return (
       <div className="flex min-h-screen items-center justify-center bg-slate-900 px-6 text-slate-100">
         <div className="w-full max-w-lg rounded-2xl border border-amber-400/40 bg-slate-950/80 p-7 shadow-lg shadow-black/30">
@@ -363,7 +408,7 @@ export default function Home() {
             Chat API is not configured
           </h1>
           <p className="mt-3 text-sm text-slate-300">
-            Set NEXT_PUBLIC_CHAT_API_BASE_URL in frontend environment settings.
+            Configure /config.json with chatApiBaseUrl.
           </p>
           <button
             type="button"
@@ -372,6 +417,38 @@ export default function Home() {
           >
             Sign out
           </button>
+        </div>
+      </div>
+    );
+  }
+
+  if (chatConfigStatus === "unavailable") {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-slate-900 px-6 text-slate-100">
+        <div className="w-full max-w-lg rounded-2xl border border-rose-400/40 bg-slate-950/80 p-7 shadow-lg shadow-black/30">
+          <h1 className="text-xl font-semibold text-rose-300">
+            Unable to load chat configuration
+          </h1>
+          <p className="mt-3 text-sm text-slate-300">
+            {chatConfigError ??
+              "Could not load /config.json right now. Please retry."}
+          </p>
+          <div className="mt-6 flex flex-wrap gap-3">
+            <button
+              type="button"
+              onClick={() => setChatConfigAttempt((value) => value + 1)}
+              className="inline-flex h-10 items-center justify-center rounded-lg border border-cyan-500/40 bg-cyan-900/30 px-4 text-sm font-medium text-cyan-100 transition-colors hover:bg-cyan-900/50"
+            >
+              Retry
+            </button>
+            <button
+              type="button"
+              onClick={() => signOut()}
+              className="inline-flex h-10 items-center justify-center rounded-lg border border-slate-600 bg-slate-800 px-4 text-sm font-medium text-slate-100 transition-colors hover:bg-slate-700"
+            >
+              Sign out
+            </button>
+          </div>
         </div>
       </div>
     );

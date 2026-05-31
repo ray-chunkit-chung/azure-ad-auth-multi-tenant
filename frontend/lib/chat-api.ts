@@ -1,6 +1,7 @@
 "use client";
 
 import { getAccessToken } from "../hooks/use-auth";
+import { getChatApiBaseUrl } from "./runtime-config";
 
 export interface ChatSession {
   id: string;
@@ -38,25 +39,15 @@ interface DeleteSessionResponse {
   deletedMessageCount: number;
 }
 
-const CHAT_API_BASE_URL = process.env.NEXT_PUBLIC_CHAT_API_BASE_URL ?? "";
-
-function ensureApiBaseUrl(): string {
-  const base = CHAT_API_BASE_URL.trim().replace(/\/$/, "");
-  if (!base) {
-    throw new Error(
-      "Missing NEXT_PUBLIC_CHAT_API_BASE_URL. Configure frontend environment for API access.",
-    );
-  }
-  return base;
-}
-
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const accessToken = getAccessToken();
   if (!accessToken) {
     throw new Error("Not authenticated");
   }
 
-  const response = await fetch(`${ensureApiBaseUrl()}${path}`, {
+  const chatApiBaseUrl = await getChatApiBaseUrl();
+
+  const response = await fetch(`${chatApiBaseUrl}${path}`, {
     ...init,
     headers: {
       "Content-Type": "application/json",

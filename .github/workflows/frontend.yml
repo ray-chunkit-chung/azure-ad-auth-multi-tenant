@@ -104,7 +104,6 @@ jobs:
           NEXT_PUBLIC_AZURE_REDIRECT_URI: ${{ steps.config.outputs.frontend_base_url }}/auth/callback
           NEXT_PUBLIC_AZURE_LOGOUT_URI: ${{ steps.config.outputs.frontend_base_url }}
           NEXT_PUBLIC_AZURE_API_SCOPE: api://${{ secrets.AZURE_APPLICATION_ID }}/chat.access
-          NEXT_PUBLIC_CHAT_API_BASE_URL: ${{ steps.config.outputs.chat_api_url }}
         run: pnpm build
 
       - name: Verify static output exists
@@ -115,15 +114,41 @@ jobs:
             exit 1
           fi
 
-      - name: Deploy to S3
+      - name: Write runtime config
         working-directory: frontend
-        run: aws s3 sync out/ s3://${{ steps.config.outputs.s3_bucket }} --delete
+        run: |
+          cat > out/config.json <<EOF
+          {
+            "chatApiBaseUrl": "${{ steps.config.outputs.chat_api_url }}"
+          }
+          EOF
+
+      - name: Deploy static assets to S3
+        working-directory: frontend
+        run: |
+          aws s3 sync out/ s3://${{ steps.config.outputs.s3_bucket }} --delete \
+            --cache-control "public,max-age=31536000,immutable"
+
+      - name: Override HTML cache headers
+        working-directory: frontend
+        run: |
+          aws s3 sync out/ s3://${{ steps.config.outputs.s3_bucket }} \
+            --exclude "*" \
+            --include "*.html" \
+            --cache-control "no-cache,no-store,must-revalidate"
+
+      - name: Override runtime config cache headers
+        working-directory: frontend
+        run: |
+          aws s3 cp out/config.json s3://${{ steps.config.outputs.s3_bucket }}/config.json \
+            --cache-control "no-cache,no-store,must-revalidate" \
+            --content-type "application/json"
 
       - name: Invalidate CloudFront cache
         run: |
           aws cloudfront create-invalidation \
             --distribution-id "${{ steps.config.outputs.distribution_id }}" \
-            --paths "/*"
+            --paths "/index.html" "/*.html" "/config.json" "/"
 
       - name: Deployment Summary
         if: ${{ success() }}
