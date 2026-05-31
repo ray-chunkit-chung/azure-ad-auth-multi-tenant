@@ -1,0 +1,62 @@
+name: Backend Destroy
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'Type "destroy" to confirm backend resource deletion'
+        required: true
+        type: string
+
+concurrency:
+  group: azure-fullstack-deploy
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  destroy:
+    name: Destroy Backend Resources
+    runs-on: ubuntu-latest
+    if: github.event.inputs.confirm == 'destroy'
+    env:
+      TF_VAR_azure_ad_tenant_id: ${{ secrets.AZURE_TENANT_ID }}
+      TF_VAR_azure_application_id: ${{ secrets.AZURE_APPLICATION_ID }}
+      TF_VAR_azure_required_scope: chat.access
+    defaults:
+      run:
+        working-directory: infra/backend
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup Python 3.13
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Build Lambda package
+        shell: bash
+        run: |
+          chmod +x ../../backend/build.sh
+          ../../backend/build.sh
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v4
+
+      - name: Terraform Init
+        shell: bash
+        run: terraform init
+
+      - name: Terraform Destroy
+        shell: bash
+        run: terraform destroy -auto-approve

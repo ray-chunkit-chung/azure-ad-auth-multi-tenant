@@ -1,0 +1,96 @@
+name: Frontend Destroy
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'Type "destroy" to confirm frontend resource deletion'
+        required: true
+        type: string
+
+concurrency:
+  group: azure-fullstack-deploy
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  destroy:
+    name: Destroy Frontend Resources
+    runs-on: ubuntu-latest
+    if: github.event.inputs.confirm == 'destroy'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v5
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Read S3 bucket name from SSM
+        id: ssm
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          PARAM="/rcoauth2azure/frontend/s3-bucket-name"
+          if aws ssm get-parameter --name "$PARAM" --query Parameter.Value --output text >/tmp/s3_bucket_name 2>/dev/null; then
+            echo "s3_bucket=$(cat /tmp/s3_bucket_name)" >> "$GITHUB_OUTPUT"
+          else
+            echo "S3 bucket parameter $PARAM not found; continuing to terraform destroy."
+            echo "s3_bucket=" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Empty frontend S3 bucket before destroy
+        if: steps.ssm.outputs.s3_bucket != ''
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          BUCKET="${{ steps.ssm.outputs.s3_bucket }}"
+
+          if ! aws s3api head-bucket --bucket "$BUCKET" 2>/dev/null; then
+            echo "Bucket $BUCKET does not exist; skipping cleanup."
+            exit 0
+          fi
+
+          echo "Deleting current objects from $BUCKET"
+          aws s3 rm "s3://$BUCKET" --recursive || true
+
+          echo "Deleting all object versions from $BUCKET"
+          aws s3api list-object-versions --bucket "$BUCKET" --output json \
+            --query '{Objects: Versions[].{Key:Key,VersionId:VersionId}}' \
+            | jq -c 'select(.Objects != null) | {Objects: .Objects, Quiet: true}' \
+            | while read -r batch; do
+                if [ -n "$batch" ] && [ "$batch" != "null" ]; then
+                  aws s3api delete-objects --bucket "$BUCKET" --delete "$batch"
+                fi
+              done
+
+          echo "Deleting all delete markers from $BUCKET"
+          aws s3api list-object-versions --bucket "$BUCKET" --output json \
+            --query '{Objects: DeleteMarkers[].{Key:Key,VersionId:VersionId}}' \
+            | jq -c 'select(.Objects != null) | {Objects: .Objects, Quiet: true}' \
+            | while read -r batch; do
+                if [ -n "$batch" ] && [ "$batch" != "null" ]; then
+                  aws s3api delete-objects --bucket "$BUCKET" --delete "$batch"
+                fi
+              done
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+
+      - name: Terraform Init
+        working-directory: infra/frontend
+        shell: bash
+        run: terraform init
+
+      - name: Terraform Destroy
+        working-directory: infra/frontend
+        shell: bash
+        run: terraform destroy -auto-approve
